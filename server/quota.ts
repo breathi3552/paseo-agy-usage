@@ -11,11 +11,16 @@ import { UsageError } from "./errors.js";
 
 // These period names are justified by the API's bucketId, not response order or
 // time until reset. durationMs is not part of Paseo 0.11's UsageWindow contract.
-const BUCKETS = [
+const BASE_BUCKETS = [
   { id: "gemini-5h", label: "Gemini · 5h", shortLabel: "Gemini 5h" },
   { id: "gemini-weekly", label: "Gemini · Weekly", shortLabel: "Gemini wk" },
   { id: "3p-5h", label: "Claude & GPT · 5h", shortLabel: "3P 5h" },
   { id: "3p-weekly", label: "Claude & GPT · Weekly", shortLabel: "3P wk" },
+] as const;
+
+// Optional or tier-dependent quota pools returned only when available on the account.
+const CONDITIONAL_BUCKETS = [
+  { id: "gemini-argon-wtu-weekly", label: "Argon · Weekly", shortLabel: "Argon wk" },
 ] as const;
 
 const summarySchema = z.object({ groups: z.array(z.unknown()) });
@@ -65,11 +70,17 @@ export function mapQuotaSummary(
       if (bucket.success && !byId.has(bucket.data.bucketId)) byId.set(bucket.data.bucketId, bucket.data);
     }
   }
-  if (!BUCKETS.some(({ id }) => byId.has(id))) {
+  const knownBuckets = [...BASE_BUCKETS, ...CONDITIONAL_BUCKETS];
+  if (!knownBuckets.some(({ id }) => byId.has(id))) {
     return unavailable({ kind: "no_quota", detail: "Antigravity did not report the Gemini or Claude & GPT quota pools for this login." });
   }
 
-  const windows = BUCKETS.map(({ id, label, shortLabel }) => {
+  const activeBuckets = [
+    ...BASE_BUCKETS,
+    ...CONDITIONAL_BUCKETS.filter(({ id }) => byId.has(id)),
+  ];
+
+  const windows = activeBuckets.map(({ id, label, shortLabel }) => {
     const bucket = byId.get(id);
     const remaining = bucket?.remainingFraction;
     const usedPct = typeof remaining === "number" && Number.isFinite(remaining)

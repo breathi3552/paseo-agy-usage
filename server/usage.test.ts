@@ -219,3 +219,28 @@ test("switching the CLI login updates both the discovered account and fetched qu
   assert.ok(report.status === "available");
   assert.equal(report.windows.find(({ id }) => id === "gemini-weekly")?.remainingPct, 80);
 });
+
+test("Antigravity accounts with Argon quota report the dedicated weekly window", async () => {
+  const quotaWithArgon = quota([
+    { bucketId: "gemini-5h", remainingFraction: 0.9 },
+    { bucketId: "gemini-weekly", remainingFraction: 0.8 },
+    { bucketId: "3p-5h", remainingFraction: 1 },
+    { bucketId: "3p-weekly", remainingFraction: 0.5 },
+    { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.75, resetTime: "2030-01-08T12:00:00Z" },
+  ]);
+  const report = await usage({
+    fetchApi: async (url, options) =>
+      String(url) === QUOTA_URL ? json(quotaWithArgon) : transport(url, options),
+  }).fetch(INPUT);
+
+  assert.ok(report.status === "available");
+  assert.equal(report.windows.length, 5);
+  const argon = report.windows.find(({ id }) => id === "gemini-argon-wtu-weekly");
+  assert.ok(argon);
+  assert.equal(argon.label, "Argon · Weekly");
+  assert.equal(argon.shortLabel, "Argon wk");
+  assert.equal(argon.remainingPct, 75);
+  assert.equal(argon.usedPct, 25);
+  assert.equal(argon.resetsAt, "2030-01-08T12:00:00.000Z");
+  assert.deepEqual(report.details, []);
+});

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Support dedicated Gemini 4 Argon weekly quota window (`gemini-argon-wtu-weekly`) when reported by Antigravity.
+
 ## 0.1.1 — 2026-10-18
 
 ### Fixed
