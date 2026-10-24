@@ -25,6 +25,7 @@ export interface AntigravityProbe {
   locateBinary(): Promise<string | null>;
   readVersion(signal: AbortSignal): Promise<string>;
   refreshLogin(signal: AbortSignal): Promise<void>;
+  runCliUsage(signal: AbortSignal): Promise<string>;
   readCredential(signal: AbortSignal): Promise<StoredCredential | null>;
 }
 
@@ -47,6 +48,7 @@ function exitCode(error: unknown): number | null {
 }
 
 const runCommand: CommandRunner = async (file, args, signal, timeoutMs = 3_500) => {
+  const isCli = args.includes("/usage");
   try {
     const { stdout } = await execCommand(file, [...args], {
       encoding: "utf8",
@@ -57,12 +59,20 @@ const runCommand: CommandRunner = async (file, args, signal, timeoutMs = 3_500) 
     });
     return { stdout, exitCode: 0 };
   } catch (error) {
-    if (signal.aborted) throw new ProbeError("Antigravity credential lookup timed out.");
+    if (signal?.aborted) {
+      if (isCli) {
+        throw new UsageError("Antigravity CLI execution timed out.");
+      }
+      throw new ProbeError("Antigravity credential lookup timed out.");
+    }
     const code = exitCode(error);
     if (code !== null) {
       const hasDiagnostic = typeof error === "object" && error !== null && "stderr" in error
         && typeof error.stderr === "string" && error.stderr.trim() !== "";
       return { stdout: "", exitCode: code, hasDiagnostic };
+    }
+    if (isCli) {
+      throw new UsageError("Cannot run Antigravity CLI. Check system permissions.");
     }
     // 子进程错误可能携带含有凭据的 stdout，禁止原样抛出。
     throw new ProbeError("Cannot run the system credential reader. Check OS keyring availability.");
@@ -169,6 +179,9 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
     store,
     locator: `${platform}:${home}:gemini:antigravity`,
     async locateBinary() {
+      const explicit = env.ANTIGRAVITY_CLI_PATH ?? env.AGY_PATH;
+      if (explicit && (await isExecutable(explicit))) return explicit;
+
       const candidates: string[] = [];
       if (windows && env.LOCALAPPDATA) {
         candidates.push(path.join(env.LOCALAPPDATA, "agy", "bin", "agy.exe"));
@@ -182,13 +195,33 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
       }
       if (!windows) {
         // Desktop daemons can have a narrower PATH than an interactive shell.
-        candidates.push(path.join(home, ".local", "bin", "agy"), "/usr/local/bin/agy");
+        candidates.push(
+          path.join(home, ".local", "bin", "agy"),
+          path.join(home, ".antigravity", "bin", "agy"),
+          "/usr/local/bin/agy",
+          "/usr/bin/agy",
+        );
         if (platform === "darwin") candidates.push("/opt/homebrew/bin/agy");
       }
       for (const candidate of new Set(candidates)) {
         if (await isExecutable(candidate)) return candidate;
       }
       return null;
+    },
+    async runCliUsage(signal) {
+      if (signal.aborted) {
+        throw new UsageError("Antigravity CLI execution timed out.");
+      }
+      const binary = await this.locateBinary();
+      if (!binary) {
+        throw new ProbeError("Antigravity binary not found. Install agy to view usage.");
+      }
+      const args = ["-p", "/usage", "--output-format", "json", "--print-timeout", "10s"] as const;
+      const result = await run(binary, args, signal, 12_000);
+      if (result.exitCode !== 0) {
+        throw new UsageError(`Antigravity CLI failed (exit code ${result.exitCode}).`);
+      }
+      return result.stdout;
     },
     async readVersion(signal) {
       const binary = await this.locateBinary();
@@ -212,6 +245,9 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
       }
     },
     async readCredential(signal) {
+      if (signal?.aborted) {
+        throw new ProbeError("Antigravity credential lookup timed out.");
+      }
       let result: CommandResult;
       if (windows) {
         // 定位 Windows 自带的读取器，不依赖 pwsh 或 PATH。
