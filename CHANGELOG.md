@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Gemini 4 Argon weekly window for logins whose quota summary reports the separate Argon pool.
+
 ## 0.1.1 — 2026-10-18
 
 ### Fixed

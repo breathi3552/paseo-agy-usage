@@ -11,12 +11,14 @@ import { UsageError } from "./errors.js";
 
 // These period names are justified by the API's bucketId, not response order or
 // time until reset. durationMs is not part of Paseo 0.11's UsageWindow contract.
-const BUCKETS = [
+const BUCKETS: readonly { id: string; label: string; shortLabel: string; optional?: true }[] = [
   { id: "gemini-5h", label: "Gemini · 5h", shortLabel: "Gemini 5h" },
   { id: "gemini-weekly", label: "Gemini · Weekly", shortLabel: "Gemini wk" },
   { id: "3p-5h", label: "Claude & GPT · 5h", shortLabel: "3P 5h" },
   { id: "3p-weekly", label: "Claude & GPT · Weekly", shortLabel: "3P wk" },
-] as const;
+  // Paid plans meter Gemini 4 Argon in a pool of its own. Other logins do not report it.
+  { id: "gemini-argon-wtu-weekly", label: "Gemini 4 Argon · Weekly", shortLabel: "Argon wk", optional: true },
+];
 
 const summarySchema = z.object({ groups: z.array(z.unknown()) });
 const groupSchema = z.object({ buckets: z.array(z.unknown()) });
@@ -69,7 +71,7 @@ export function mapQuotaSummary(
     return unavailable({ kind: "no_quota", detail: "Antigravity did not report the Gemini or Claude & GPT quota pools for this login." });
   }
 
-  const windows = BUCKETS.map(({ id, label, shortLabel }) => {
+  const windows = BUCKETS.filter(({ id, optional }) => !optional || byId.has(id)).map(({ id, label, shortLabel }) => {
     const bucket = byId.get(id);
     const remaining = bucket?.remainingFraction;
     const usedPct = typeof remaining === "number" && Number.isFinite(remaining)

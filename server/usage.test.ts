@@ -74,6 +74,22 @@ test("a signed-in account produces the email footer, plan badge and four quota w
   assert.deepEqual(report.details, []); // No duplicate Plan or Account rows.
 });
 
+test("a separately metered Gemini 4 Argon pool adds its weekly window", async () => {
+  const withArgon = quota([
+    ...QUOTA.groups.flatMap(({ buckets }) => buckets),
+    { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.75, resetTime: "2030-01-08T00:00:00Z" },
+  ]);
+  const report = await usage({ fetchApi: async (url) => json(String(url) === PLAN_URL
+    ? { paidTier: { id: "g1-pro-tier" } }
+    : withArgon) }).fetch(INPUT);
+  assert.ok(report.status === "available");
+  assert.deepEqual(report.windows.map(({ id, remainingPct }) => [id, remainingPct]), [
+    ["gemini-5h", 100], ["gemini-weekly", 25], ["3p-5h", 10], ["3p-weekly", 0], ["gemini-argon-wtu-weekly", 75],
+  ]);
+  assert.equal(report.windows.at(-1)?.label, "Gemini 4 Argon · Weekly");
+  assert.deepEqual(report.details, []);
+});
+
 test("Windows 在没有 pwsh 和 PowerShell PATH 时仍能读取登录并获取额度", async () => {
   const executables: Record<string, string> = {
     [BINARY]: "1.4.2\n",
