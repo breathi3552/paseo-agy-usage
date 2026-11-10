@@ -1,6 +1,6 @@
 import { execCommand } from "@getpaseo/plugin/server";
 import { constants } from "node:fs";
-import { access, stat } from "node:fs/promises";
+import { access, readFile as defaultReadFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import { z } from "zod";
@@ -144,6 +144,7 @@ export interface ProbeOptions {
   home?: string;
   run?: CommandRunner;
   isExecutable?: (path: string) => Promise<boolean>;
+  readFile?: (path: string, encoding: "utf8") => Promise<string>;
 }
 
 export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
@@ -153,6 +154,7 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
   const windows = platform === "win32";
   const path = windows ? win32 : posix;
   const run = options.run ?? runCommand;
+  const readFile = options.readFile ?? defaultReadFile;
   const isExecutable = options.isExecutable ?? (async (file: string) => {
     try {
       if (!(await stat(file)).isFile()) return false;
@@ -169,25 +171,97 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
     store,
     locator: `${platform}:${home}:gemini:antigravity`,
     async locateBinary() {
-      const candidates: string[] = [];
-      if (windows && env.LOCALAPPDATA) {
-        candidates.push(path.join(env.LOCALAPPDATA, "agy", "bin", "agy.exe"));
+      const expandPath = (raw?: string | null): string | null => {
+        if (!raw) return null;
+        const unquoted = raw.trim().replace(/^"|"$/g, "").trim();
+        if (!unquoted) return null;
+        const expanded = unquoted === "~"
+          ? home
+          : unquoted.startsWith("~/") || (windows && unquoted.startsWith("~\\"))
+            ? path.join(home, unquoted.slice(2))
+            : unquoted;
+        if (!path.isAbsolute(expanded)) return null;
+        const normalized = path.normalize(expanded);
+        return normalized.length > (windows ? 3 : 1) ? normalized.replace(/[/\\]+$/, "") : normalized;
+      };
+
+      const expandBinaryCandidates = (target: string): string[] => {
+        if (windows) {
+          const direct = path.extname(target) !== "" ? [target] : [`${target}.exe`, `${target}.cmd`, target];
+          return [...direct, path.join(target, "agy.exe"), path.join(target, "agy.cmd")];
+        }
+        return [target, path.join(target, "agy")];
+      };
+
+      const testTarget = async (target: string): Promise<string | null> => {
+        for (const candidate of expandBinaryCandidates(target)) {
+          if (await isExecutable(candidate)) return candidate;
+        }
+        return null;
+      };
+
+      // 优先级 1（显式环境变量）
+      for (const raw of [env.ANTIGRAVITY_CLI_PATH, env.AGY_PATH]) {
+        const target = expandPath(raw);
+        if (target) {
+          const found = await testTarget(target);
+          if (found) return found;
+        }
       }
-      // Resolve PATH ourselves: never execute an untrusted candidate merely to probe it.
+
+      // 优先级 2（Paseo 宿主配置，可选）
+      try {
+        const paseoHome = expandPath(env.PASEO_HOME) ?? path.join(home, ".paseo");
+        const configPath = path.join(paseoHome, "config.json");
+        const config = JSON.parse(await readFile(configPath, "utf8"));
+        const command = config?.agents?.providers?.antigravity?.command?.[0];
+        if (typeof command === "string") {
+          const target = expandPath(command);
+          if (target) {
+            const found = await testTarget(target);
+            if (found) return found;
+          }
+        }
+      } catch {
+        // config 不存在、无法读取或非合法 JSON 时忽略
+      }
+
+      // 优先级 3（系统安装器默认路径 + PATH 遍历）
       const searchPath = env.PATH ?? env.Path ?? "";
-      for (const rawDirectory of searchPath.split(path.delimiter)) {
-        const directory = rawDirectory.replace(/^"|"$/g, "");
-        if (!path.isAbsolute(directory)) continue;
-        candidates.push(path.join(directory, windows ? "agy.exe" : "agy"));
+      const pathDirs = searchPath
+        .split(path.delimiter)
+        .map(expandPath)
+        .filter((d): d is string => d !== null);
+
+      const candidateDirs: string[] = windows
+        ? [
+            ...(env.LOCALAPPDATA ? [path.join(env.LOCALAPPDATA, "agy", "bin")] : []),
+            path.join(home, "AppData", "Local", "agy", "bin"),
+            path.join(home, ".antigravity", "bin"),
+            path.join(home, ".local", "bin"),
+            ...pathDirs,
+          ]
+        : [
+            ...pathDirs,
+            path.join(home, ".local", "bin"),
+            path.join(home, ".antigravity", "bin"),
+            ...(platform === "darwin" ? ["/opt/homebrew/bin"] : []),
+            "/usr/local/bin",
+            "/usr/bin",
+          ];
+
+      const tested = new Set<string>();
+      for (const dir of candidateDirs) {
+        const binaryCandidates = windows
+          ? [path.join(dir, "agy.exe"), path.join(dir, "agy.cmd")]
+          : [path.join(dir, "agy")];
+        for (const candidate of binaryCandidates) {
+          if (tested.has(candidate)) continue;
+          tested.add(candidate);
+          if (await isExecutable(candidate)) return candidate;
+        }
       }
-      if (!windows) {
-        // Desktop daemons can have a narrower PATH than an interactive shell.
-        candidates.push(path.join(home, ".local", "bin", "agy"), "/usr/local/bin/agy");
-        if (platform === "darwin") candidates.push("/opt/homebrew/bin/agy");
-      }
-      for (const candidate of new Set(candidates)) {
-        if (await isExecutable(candidate)) return candidate;
-      }
+
       return null;
     },
     async readVersion(signal) {
