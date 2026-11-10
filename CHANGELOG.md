@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — 2026-11-10
 
 ### Added
 
-- Gemini 4 Argon weekly window for logins whose quota summary reports the separate Argon pool.
+- Gemini 4 Argon weekly window for logins whose quota summary reports the separate Argon pool (thanks @gtoxlili, #3).
+- Robust multi-platform Antigravity CLI binary resolution across Windows, macOS, and Linux, supporting custom environment variables, Paseo host configuration, and standard installation paths (inspired by @LunabellaBetter, #1).
 
 ## 0.1.1 — 2026-10-18
 
