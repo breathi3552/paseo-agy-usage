@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { posix } from "node:path";
 import { test } from "node:test";
-import { createNodeProbe } from "./probe.js";
+import { candidateTokenPaths, createNodeProbe, parseStoredCredential } from "./probe.js";
 
 test("优先级 1: ANTIGRAVITY_CLI_PATH 命中指定文件", async () => {
   const target = "/custom/tools/agy";
@@ -148,4 +149,54 @@ test("优先级 3 Linux: 不探测 macOS 特有的 /opt/homebrew/bin", async () 
     isExecutable: async (p) => p === "/opt/homebrew/bin/agy",
   });
   assert.equal(await probe.locateBinary(), null);
+});
+
+test("candidateTokenPaths: 覆盖标准目录及 ANTIGRAVITY_APP_DATA_DIR", () => {
+  const paths = candidateTokenPaths("/home/user", { ANTIGRAVITY_APP_DATA_DIR: "/custom/data" }, posix);
+  assert.ok(paths.includes("/custom/data/antigravity-oauth-token"));
+  assert.ok(paths.includes("/home/user/.gemini/antigravity-cli/antigravity-oauth-token"));
+  assert.ok(paths.includes("/home/user/.antigravity/antigravity-oauth-token"));
+});
+
+test("parseStoredCredential: 支持 id_token_email 与嵌套 token 结构", () => {
+  const raw = JSON.stringify({
+    token: {
+      access_token: "test-token",
+      expiry: "2026-11-15T15:41:04.541924648+08:00",
+      refresh_token: "test-refresh",
+    },
+    auth_method: "consumer",
+    id_token_email: "user@example.com",
+  });
+  const cred = parseStoredCredential(raw);
+  assert.equal(cred.accessToken, "test-token");
+  assert.equal(cred.email, "user@example.com");
+  assert.ok(cred.expiresAtMs !== null);
+});
+
+test("Linux readCredential: 当 secret-tool 失败时降级回退到本地 token 文件", async () => {
+  const tokenFile = "/home/test/.gemini/antigravity-cli/antigravity-oauth-token";
+  const rawToken = JSON.stringify({
+    token: { access_token: "file-access-token", expiry: "2030-01-01T00:00:00Z" },
+    id_token_email: "fileuser@example.com",
+  });
+  const probe = createNodeProbe({
+    platform: "linux",
+    home: "/home/test",
+    run: async () => {
+      // 模拟无 D-Bus 会话时 secret-tool 抛错且含有 stderr 诊断
+      const err = new Error("Command failed");
+      (err as unknown as { code: number; stderr: string }).code = 1;
+      (err as unknown as { code: number; stderr: string }).stderr = "secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY";
+      throw err;
+    },
+    readFile: async (file) => {
+      if (file === tokenFile) return rawToken;
+      throw new Error("ENOENT");
+    },
+  });
+  const cred = await probe.readCredential(new AbortController().signal);
+  assert.ok(cred);
+  assert.equal(cred.accessToken, "file-access-token");
+  assert.equal(cred.email, "fileuser@example.com");
 });

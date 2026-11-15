@@ -235,3 +235,43 @@ test("switching the CLI login updates both the discovered account and fetched qu
   assert.ok(report.status === "available");
   assert.equal(report.windows.find(({ id }) => id === "gemini-weekly")?.remainingPct, 80);
 });
+
+test("Linux 下无 D-Bus 会话时通过本地 token 文件发现账号并查询额度", async () => {
+  const linuxBinary = "/usr/bin/agy";
+  const tokenFile = "/home/test/.gemini/antigravity-cli/antigravity-oauth-token";
+  const rawToken = JSON.stringify({
+    token: { access_token: "test-access", expiry: NOW + 3_600_000 },
+    id_token_email: "linuxuser@example.com",
+  });
+  const api = createUsageHandlers({
+    probe: createNodeProbe({
+      platform: "linux",
+      home: "/home/test",
+      env: { PATH: "/usr/bin" },
+      isExecutable: async (path) => path === linuxBinary,
+      readFile: async (path) => {
+        if (path === tokenFile) return rawToken;
+        throw new Error("ENOENT");
+      },
+      run: async (file) => {
+        if (file === linuxBinary) {
+          return { stdout: "1.4.2\n", exitCode: 0 };
+        }
+        const err = new Error("Command failed");
+        (err as unknown as { code: number; stderr: string }).code = 1;
+        (err as unknown as { code: number; stderr: string }).stderr = "secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY";
+        throw err;
+      },
+    }),
+    fetchApi: transport,
+    now: () => NOW,
+  });
+
+  const [account] = await api.discover({ kind: "global" });
+  assert.ok(account);
+  assert.equal(account.label, "linuxuser@example.com");
+
+  const report = await api.fetch(account.input);
+  assert.ok(report.status === "available");
+  assert.equal(report.planLabel, "Google AI Pro");
+});

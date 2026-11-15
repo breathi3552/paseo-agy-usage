@@ -79,11 +79,16 @@ const tokenSchema = z.object({
   expiresAt: z.union([z.string(), z.number()]).optional(),
   expiry_date: z.union([z.string(), z.number()]).optional(),
   email: z.string().optional(),
+  id_token_email: z.string().optional(),
   id_token: z.unknown().optional(),
   idToken: z.unknown().optional(),
 });
 
-const storedSchema = tokenSchema.extend({ token: tokenSchema.optional() });
+const storedSchema = tokenSchema.extend({
+  token: tokenSchema.optional(),
+  auth_method: z.string().optional(),
+  id_token_email: z.string().optional(),
+});
 
 /** Accept RFC3339, Unix seconds and Unix milliseconds, but never invent an expiry. */
 export function timestampMs(value: unknown): number | null {
@@ -134,8 +139,58 @@ export function parseStoredCredential(raw: string): StoredCredential {
   return {
     accessToken,
     expiresAtMs: timestampMs(token.expiry ?? token.expires_at ?? token.expiresAt ?? token.expiry_date),
-    email: root.email || token.email || emailFromIdToken(root.id_token ?? root.idToken ?? token.id_token ?? token.idToken),
+    email: root.email || root.id_token_email || token.email || token.id_token_email || emailFromIdToken(root.id_token ?? root.idToken ?? token.id_token ?? token.idToken),
   };
+}
+
+export function candidateTokenPaths(
+  home: string,
+  env: NodeJS.ProcessEnv,
+  path: typeof posix | typeof win32,
+): string[] {
+  const dirs: string[] = [];
+  const expand = (raw?: string | null): string | null => {
+    if (!raw) return null;
+    const unquoted = raw.trim().replace(/^"|"$/g, "").trim();
+    if (!unquoted) return null;
+    return unquoted === "~"
+      ? home
+      : unquoted.startsWith("~/") || (path === win32 && unquoted.startsWith("~\\"))
+        ? path.join(home, unquoted.slice(2))
+        : unquoted;
+  };
+
+  for (const raw of [env.ANTIGRAVITY_APP_DATA_DIR, env.AGY_APP_DATA_DIR]) {
+    const dir = expand(raw);
+    if (dir) dirs.push(dir);
+  }
+
+  dirs.push(path.join(home, ".gemini", "antigravity-cli"));
+  dirs.push(path.join(home, ".antigravity"));
+
+  if (env.LOCALAPPDATA) {
+    dirs.push(path.join(env.LOCALAPPDATA, "antigravity"));
+    dirs.push(path.join(env.LOCALAPPDATA, "agy"));
+    dirs.push(path.join(env.LOCALAPPDATA, "Google", "Antigravity"));
+  }
+  if (env.APPDATA) {
+    dirs.push(path.join(env.APPDATA, "antigravity"));
+    dirs.push(path.join(env.APPDATA, "agy"));
+  }
+
+  const filenames = ["antigravity-oauth-token", "jetski-standalone-oauth-token"];
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    for (const file of filenames) {
+      const candidate = path.join(dir, file);
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        paths.push(candidate);
+      }
+    }
+  }
+  return paths;
 }
 
 export interface ProbeOptions {
@@ -286,34 +341,68 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
       }
     },
     async readCredential(signal) {
-      let result: CommandResult;
-      if (windows) {
-        // 定位 Windows 自带的读取器，不依赖 pwsh 或 PATH。
-        const powershell = path.join(
-          env.SystemRoot ?? env.WINDIR ?? "C:\\Windows",
-          "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
-        );
-        result = await run(powershell, [
-          "-NoProfile", "-NonInteractive", "-EncodedCommand",
-          Buffer.from(WINDOWS_CREDENTIAL_SCRIPT, "utf16le").toString("base64"),
-        ], signal);
-      } else if (platform === "darwin") {
-        result = await run("/usr/bin/security", [
-          "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w",
-        ], signal);
-        if (result.exitCode === 44) return null; // errSecItemNotFound
-      } else if (platform === "linux") {
-        // Requires libsecret's secret-tool and an unlocked Secret Service session.
-        result = await run("secret-tool", ["lookup", "service", "gemini", "username", "antigravity"], signal);
-        if (result.exitCode === 1 && !result.hasDiagnostic) return null;
-      } else {
-        throw new ProbeError("Antigravity usage supports Windows, macOS and Linux keyrings only.");
+      const readTokenFromFile = async (): Promise<StoredCredential | null> => {
+        for (const candidate of candidateTokenPaths(home, env, path)) {
+          if (signal.aborted) throw new ProbeError("Antigravity credential lookup timed out.");
+          try {
+            const raw = await readFile(candidate, "utf8");
+            if (raw && raw.trim() !== "") {
+              return parseStoredCredential(raw);
+            }
+          } catch {
+            // File not found or unreadable, continue to next candidate
+          }
+        }
+        return null;
+      };
+
+      let result: CommandResult | null = null;
+      let keyringError: unknown = null;
+      try {
+        if (windows) {
+          // 定位 Windows 自带的读取器，不依赖 pwsh 或 PATH。
+          const powershell = path.join(
+            env.SystemRoot ?? env.WINDIR ?? "C:\\Windows",
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+          );
+          result = await run(powershell, [
+            "-NoProfile", "-NonInteractive", "-EncodedCommand",
+            Buffer.from(WINDOWS_CREDENTIAL_SCRIPT, "utf16le").toString("base64"),
+          ], signal);
+        } else if (platform === "darwin") {
+          result = await run("/usr/bin/security", [
+            "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w",
+          ], signal);
+          if (result.exitCode === 44) result = { stdout: "", exitCode: 0 }; // errSecItemNotFound
+        } else if (platform === "linux") {
+          // Requires libsecret's secret-tool and an unlocked Secret Service session.
+          result = await run("secret-tool", ["lookup", "service", "gemini", "username", "antigravity"], signal);
+          if (result.exitCode === 1 && !result.hasDiagnostic) result = { stdout: "", exitCode: 0 };
+        }
+      } catch (err) {
+        keyringError = err;
       }
-      if (result.exitCode !== 0) {
+
+      if (result && result.exitCode === 0 && result.stdout.trim() !== "") {
+        return parseStoredCredential(result.stdout.trim());
+      }
+
+      // 降级回退：读取 CLI 落盘的文件型凭据（用于无 D-Bus 会话、容器、后台守护进程或 Keyring 超时降级场景）
+      const fileCredential = await readTokenFromFile();
+      if (fileCredential) {
+        return fileCredential;
+      }
+
+      if (keyringError) {
+        if (keyringError instanceof ProbeError) throw keyringError;
         throw new ProbeError("Cannot read the Antigravity keyring item. Check permissions and unlock the OS keyring.");
       }
-      const raw = result.stdout.trim();
-      return raw === "" ? null : parseStoredCredential(raw);
+
+      if (result && result.exitCode !== 0) {
+        throw new ProbeError("Cannot read the Antigravity keyring item. Check permissions and unlock the OS keyring.");
+      }
+
+      return null;
     },
   };
 }
