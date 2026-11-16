@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Read the Linux keyring from headless hosts: when the Paseo daemon runs as a system service, container, or any process without `DBUS_SESSION_BUS_ADDRESS`, `secret-tool` used to fail with “Cannot autolaunch D-Bus without X11 $DISPLAY”, so the usage account silently disappeared from the native Usage settings. The credential reader now derives the session bus from `XDG_RUNTIME_DIR`, falling back to `/run/user/<uid>`, and only when that socket exists.
+- Fall back to CLI-written token files when the OS keyring is unavailable, and read the account email from `id_token_email`.
+
 ## 0.1.2 — 2026-11-10
 
 ### Added

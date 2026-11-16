@@ -39,6 +39,7 @@ export type CommandRunner = (
   args: readonly string[],
   signal: AbortSignal,
   timeoutMs?: number,
+  env?: NodeJS.ProcessEnv,
 ) => Promise<CommandResult>;
 
 function exitCode(error: unknown): number | null {
@@ -46,7 +47,7 @@ function exitCode(error: unknown): number | null {
   return typeof error.code === "number" ? error.code : null;
 }
 
-const runCommand: CommandRunner = async (file, args, signal, timeoutMs = 3_500) => {
+const runCommand: CommandRunner = async (file, args, signal, timeoutMs = 3_500, env) => {
   try {
     const { stdout } = await execCommand(file, [...args], {
       encoding: "utf8",
@@ -54,6 +55,7 @@ const runCommand: CommandRunner = async (file, args, signal, timeoutMs = 3_500) 
       maxBuffer: 128 * 1024,
       shell: false,
       signal,
+      ...(env ? { env } : {}),
     });
     return { stdout, exitCode: 0 };
   } catch (error) {
@@ -193,12 +195,30 @@ export function candidateTokenPaths(
   return paths;
 }
 
+/**
+ * systemd 服务、容器与 ssh 无会话环境下启动的宿主进程拿不到 D-Bus 会话总线，
+ * secret-tool 会直接以「Cannot autolaunch D-Bus without X11 $DISPLAY」失败。
+ * 登录常驻（linger）时总线就在 XDG_RUNTIME_DIR 下，可以直接推导出来。
+ * 返回 null 表示无需注入（已有可用地址，或推不出运行时目录）。
+ */
+export function sessionBusAddress(env: NodeJS.ProcessEnv, uid: number | undefined): string | null {
+  if (env.DBUS_SESSION_BUS_ADDRESS?.trim()) return null;
+  const configured = env.XDG_RUNTIME_DIR?.trim();
+  const runtime = configured?.startsWith("/")
+    ? configured
+    : uid === undefined ? null : `/run/user/${uid}`;
+  if (!runtime) return null;
+  return `unix:path=${posix.join(runtime, "bus")}`;
+}
+
 export interface ProbeOptions {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   home?: string;
+  uid?: number;
   run?: CommandRunner;
   isExecutable?: (path: string) => Promise<boolean>;
+  hasSessionBusSocket?: (path: string) => Promise<boolean>;
   readFile?: (path: string, encoding: "utf8") => Promise<string>;
 }
 
@@ -206,10 +226,18 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
+  const uid = options.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
   const windows = platform === "win32";
   const path = windows ? win32 : posix;
   const run = options.run ?? runCommand;
   const readFile = options.readFile ?? defaultReadFile;
+  const hasSessionBusSocket = options.hasSessionBusSocket ?? (async (file: string) => {
+    try {
+      return (await stat(file)).isSocket();
+    } catch {
+      return false;
+    }
+  });
   const isExecutable = options.isExecutable ?? (async (file: string) => {
     try {
       if (!(await stat(file)).isFile()) return false;
@@ -221,6 +249,18 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
   });
   const store: CredentialStore = windows ? "windows-credential-manager"
     : platform === "darwin" ? "macos-keychain" : "secret-service";
+
+  /** 补全后的子进程环境；无需注入时返回 undefined，保持原有的环境继承行为。 */
+  async function secretServiceChildEnv(): Promise<NodeJS.ProcessEnv | undefined> {
+    const address = sessionBusAddress(env, uid);
+    if (!address) return undefined;
+    const socket = address.slice("unix:path=".length);
+    if (!(await hasSessionBusSocket(socket))) return undefined;
+    const extra: NodeJS.ProcessEnv = { DBUS_SESSION_BUS_ADDRESS: address };
+    if (!env.XDG_RUNTIME_DIR?.trim()) extra.XDG_RUNTIME_DIR = posix.dirname(socket);
+    // env 是覆盖式传参，必须带上完整环境，否则 PATH 丢失会让子进程连自身都解析不到。
+    return { ...process.env, ...extra };
+  }
 
   return {
     store,
@@ -376,7 +416,14 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
           if (result.exitCode === 44) result = { stdout: "", exitCode: 0 }; // errSecItemNotFound
         } else if (platform === "linux") {
           // Requires libsecret's secret-tool and an unlocked Secret Service session.
-          result = await run("secret-tool", ["lookup", "service", "gemini", "username", "antigravity"], signal);
+          // 宿主进程没有会话总线时（systemd 服务、容器）先补上推导出的标准地址。
+          result = await run(
+            "secret-tool",
+            ["lookup", "service", "gemini", "username", "antigravity"],
+            signal,
+            undefined,
+            await secretServiceChildEnv(),
+          );
           if (result.exitCode === 1 && !result.hasDiagnostic) result = { stdout: "", exitCode: 0 };
         }
       } catch (err) {

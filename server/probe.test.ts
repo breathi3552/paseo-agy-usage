@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { posix } from "node:path";
 import { test } from "node:test";
-import { candidateTokenPaths, createNodeProbe, parseStoredCredential } from "./probe.js";
+import { candidateTokenPaths, createNodeProbe, parseStoredCredential, sessionBusAddress } from "./probe.js";
 
 test("优先级 1: ANTIGRAVITY_CLI_PATH 命中指定文件", async () => {
   const target = "/custom/tools/agy";
@@ -199,4 +199,72 @@ test("Linux readCredential: 当 secret-tool 失败时降级回退到本地 token
   assert.ok(cred);
   assert.equal(cred.accessToken, "file-access-token");
   assert.equal(cred.email, "fileuser@example.com");
+});
+
+test("sessionBusAddress: 已有地址时不覆盖，否则优先 XDG_RUNTIME_DIR 再回落 /run/user/<uid>", () => {
+  assert.equal(sessionBusAddress({ DBUS_SESSION_BUS_ADDRESS: "unix:path=/custom/bus" }, 1000), null);
+  assert.equal(sessionBusAddress({ DBUS_SESSION_BUS_ADDRESS: "  " }, 1000), "unix:path=/run/user/1000/bus");
+  assert.equal(sessionBusAddress({ XDG_RUNTIME_DIR: "/tmp/runtime" }, 1000), "unix:path=/tmp/runtime/bus");
+  assert.equal(sessionBusAddress({}, 1000), "unix:path=/run/user/1000/bus");
+  assert.equal(sessionBusAddress({}, undefined), null);
+});
+
+const keyringSecret = JSON.stringify({
+  token: { access_token: "keyring-access-token", expiry: "2030-01-01T00:00:00Z" },
+  id_token_email: "keyring@example.com",
+});
+
+test("Linux readCredential: 宿主进程没有会话总线时注入推导出的 DBUS 地址", async () => {
+  let seenEnv: NodeJS.ProcessEnv | undefined;
+  const probe = createNodeProbe({
+    platform: "linux",
+    env: { PATH: "/usr/bin" },
+    home: "/home/test",
+    uid: 1000,
+    hasSessionBusSocket: async (p) => p === "/run/user/1000/bus",
+    run: async (_file, _args, _signal, _timeout, env) => {
+      seenEnv = env;
+      return { stdout: keyringSecret, exitCode: 0 };
+    },
+  });
+  const cred = await probe.readCredential(new AbortController().signal);
+  assert.equal(cred?.accessToken, "keyring-access-token");
+  assert.equal(seenEnv?.DBUS_SESSION_BUS_ADDRESS, "unix:path=/run/user/1000/bus");
+  assert.equal(seenEnv?.XDG_RUNTIME_DIR, "/run/user/1000");
+  // 覆盖式传参必须继承宿主完整环境，只补这两个变量；探针的 env 只用于路径探测。
+  assert.equal(seenEnv?.PATH, process.env.PATH);
+});
+
+test("Linux readCredential: 总线 socket 不存在时保持原环境，不误注入", async () => {
+  let seenEnv: NodeJS.ProcessEnv | undefined = { STALE: "1" };
+  const probe = createNodeProbe({
+    platform: "linux",
+    env: {},
+    home: "/home/test",
+    uid: 1000,
+    hasSessionBusSocket: async () => false,
+    run: async (_file, _args, _signal, _timeout, env) => {
+      seenEnv = env;
+      return { stdout: keyringSecret, exitCode: 0 };
+    },
+  });
+  assert.ok(await probe.readCredential(new AbortController().signal));
+  assert.equal(seenEnv, undefined);
+});
+
+test("Linux readCredential: 已配置 DBUS_SESSION_BUS_ADDRESS 时原样透传", async () => {
+  let seenEnv: NodeJS.ProcessEnv | undefined;
+  const probe = createNodeProbe({
+    platform: "linux",
+    env: { DBUS_SESSION_BUS_ADDRESS: "unix:path=/custom/bus" },
+    home: "/home/test",
+    uid: 1000,
+    hasSessionBusSocket: async () => true,
+    run: async (_file, _args, _signal, _timeout, env) => {
+      seenEnv = env;
+      return { stdout: keyringSecret, exitCode: 0 };
+    },
+  });
+  assert.ok(await probe.readCredential(new AbortController().signal));
+  assert.equal(seenEnv, undefined);
 });
