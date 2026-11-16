@@ -252,6 +252,26 @@ test("Linux readCredential: 总线 socket 不存在时保持原环境，不误�
   assert.equal(seenEnv, undefined);
 });
 
+test("Linux refreshLogin: 续期子进程也带上会话总线，否则新 token 存不回 keyring", async () => {
+  const binary = "/home/test/.local/bin/agy";
+  const calls: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv | undefined }> = [];
+  const probe = createNodeProbe({
+    platform: "linux",
+    env: {},
+    home: "/home/test",
+    uid: 1000,
+    hasSessionBusSocket: async (p) => p === "/run/user/1000/bus",
+    isExecutable: async (p) => p === binary,
+    run: async (_file, args, _signal, _timeout, env) => {
+      calls.push({ args, env });
+      return { stdout: "", exitCode: 0 };
+    },
+  });
+  await probe.refreshLogin(new AbortController().signal);
+  assert.deepEqual(calls[0]?.args, ["models"]);
+  assert.equal(calls[0]?.env?.DBUS_SESSION_BUS_ADDRESS, "unix:path=/run/user/1000/bus");
+});
+
 test("Linux readCredential: 已配置 DBUS_SESSION_BUS_ADDRESS 时原样透传", async () => {
   let seenEnv: NodeJS.ProcessEnv | undefined;
   const probe = createNodeProbe({

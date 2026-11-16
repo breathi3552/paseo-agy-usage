@@ -250,8 +250,11 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
   const store: CredentialStore = windows ? "windows-credential-manager"
     : platform === "darwin" ? "macos-keychain" : "secret-service";
 
-  /** 补全后的子进程环境；无需注入时返回 undefined，保持原有的环境继承行为。 */
-  async function secretServiceChildEnv(): Promise<NodeJS.ProcessEnv | undefined> {
+  /**
+   * 为需要访问 keyring 的子进程（secret-tool、`agy models` 续期）补全环境变量。
+   * 无需注入时返回 undefined，保持原有的环境继承行为。
+   */
+  async function sessionBusChildEnv(): Promise<NodeJS.ProcessEnv | undefined> {
     const address = sessionBusAddress(env, uid);
     if (!address) return undefined;
     const socket = address.slice("unix:path=".length);
@@ -374,7 +377,8 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
         const binary = await this.locateBinary();
         if (!binary) throw new ProbeError("Cannot find agy.");
         // 让 CLI 自己续期和保存凭据，不直接兑换 refresh token，也不启动聊天。
-        const result = await run(binary, ["models"], signal, 8_000);
+        // 续期要读写 keyring，子进程同样需要会话总线，否则新 token 存不回去。
+        const result = await run(binary, ["models"], signal, 8_000, await sessionBusChildEnv());
         if (result.exitCode !== 0) throw new ProbeError("agy models failed.");
       } catch {
         throw new ProbeError("Antigravity login renewal failed. Sign in with agy, then refresh usage.");
@@ -422,7 +426,7 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
             ["lookup", "service", "gemini", "username", "antigravity"],
             signal,
             undefined,
-            await secretServiceChildEnv(),
+            await sessionBusChildEnv(),
           );
           if (result.exitCode === 1 && !result.hasDiagnostic) result = { stdout: "", exitCode: 0 };
         }
