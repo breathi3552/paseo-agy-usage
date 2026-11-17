@@ -89,23 +89,19 @@ export function createUsageHandlers(dependencies: UsageDependencies) {
       // Do not silently attach the daemon user's default login to a session.
       if (scope.kind !== "global") return [];
       if (!(await probe.locateBinary())) return [];
-      try {
-        const credential = await withTimeout(4_000, "credential lookup", (signal) => probe.readCredential(signal));
-        if (!credential) return [];
-        return [{
-          key: hashAccountKey(credential.email ? `antigravity:${credential.email}` : probe.locator),
-          label: credential.email ?? "Antigravity",
-          harness: "agy",
-          input: { store: probe.store },
-        }];
-      } catch {
-        return [];
-      }
+      const credential = await withTimeout(4_000, "credential lookup", (signal) => probe.readCredential(signal));
+      if (!credential) return [];
+      return [{
+        key: hashAccountKey(credential.email ? `antigravity:${credential.email}` : probe.locator),
+        label: credential.email ?? "Antigravity",
+        harness: "agy",
+        input: { store: probe.store },
+      }];
     },
     async fetch(input: unknown): Promise<UsageReport> {
       const parsed = inputSchema.safeParse(input);
       if (!parsed.success) return { status: "error", error: "Invalid Antigravity credential store input." };
-      if (parsed.data.store !== probe.store && parsed.data.store !== "file" && probe.store !== "file") {
+      if (parsed.data.store !== probe.store) {
         return { status: "error", error: "This Antigravity credential store belongs to another operating system." };
       }
       try {

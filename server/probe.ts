@@ -89,7 +89,6 @@ const tokenSchema = z.object({
 const storedSchema = tokenSchema.extend({
   token: tokenSchema.optional(),
   auth_method: z.string().optional(),
-  id_token_email: z.string().optional(),
 });
 
 /** Accept RFC3339, Unix seconds and Unix milliseconds, but never invent an expiry. */
@@ -145,39 +144,50 @@ export function parseStoredCredential(raw: string): StoredCredential {
   };
 }
 
+function expandPath(
+  raw: string | null | undefined,
+  home: string,
+  path: typeof posix | typeof win32,
+): string | null {
+  if (!raw) return null;
+  const unquoted = raw.trim().replace(/^"|"$/g, "").trim();
+  if (!unquoted) return null;
+  const windows = path === win32;
+  const expanded = unquoted === "~"
+    ? home
+    : unquoted.startsWith("~/") || (windows && unquoted.startsWith("~\\"))
+      ? path.join(home, unquoted.slice(2))
+      : unquoted;
+  if (!path.isAbsolute(expanded)) return null;
+  const normalized = path.normalize(expanded);
+  return normalized.length > (windows ? 3 : 1) ? normalized.replace(/[/\\]+$/, "") : normalized;
+}
+
 export function candidateTokenPaths(
   home: string,
   env: NodeJS.ProcessEnv,
   path: typeof posix | typeof win32,
 ): string[] {
   const dirs: string[] = [];
-  const expand = (raw?: string | null): string | null => {
-    if (!raw) return null;
-    const unquoted = raw.trim().replace(/^"|"$/g, "").trim();
-    if (!unquoted) return null;
-    return unquoted === "~"
-      ? home
-      : unquoted.startsWith("~/") || (path === win32 && unquoted.startsWith("~\\"))
-        ? path.join(home, unquoted.slice(2))
-        : unquoted;
-  };
 
   for (const raw of [env.ANTIGRAVITY_APP_DATA_DIR, env.AGY_APP_DATA_DIR]) {
-    const dir = expand(raw);
+    const dir = expandPath(raw, home, path);
     if (dir) dirs.push(dir);
   }
 
   dirs.push(path.join(home, ".gemini", "antigravity-cli"));
   dirs.push(path.join(home, ".antigravity"));
 
-  if (env.LOCALAPPDATA) {
-    dirs.push(path.join(env.LOCALAPPDATA, "antigravity"));
-    dirs.push(path.join(env.LOCALAPPDATA, "agy"));
-    dirs.push(path.join(env.LOCALAPPDATA, "Google", "Antigravity"));
-  }
-  if (env.APPDATA) {
-    dirs.push(path.join(env.APPDATA, "antigravity"));
-    dirs.push(path.join(env.APPDATA, "agy"));
+  if (path === win32) {
+    const localAppData = expandPath(env.LOCALAPPDATA, home, path) ?? path.join(home, "AppData", "Local");
+    dirs.push(path.join(localAppData, "antigravity"));
+    dirs.push(path.join(localAppData, "agy"));
+    dirs.push(path.join(localAppData, "Google", "Antigravity"));
+    const appData = expandPath(env.APPDATA, home, path);
+    if (appData) {
+      dirs.push(path.join(appData, "antigravity"));
+      dirs.push(path.join(appData, "agy"));
+    }
   }
 
   const filenames = ["antigravity-oauth-token", "jetski-standalone-oauth-token"];
@@ -216,6 +226,7 @@ export interface ProbeOptions {
   env?: NodeJS.ProcessEnv;
   home?: string;
   uid?: number;
+  now?: () => number;
   run?: CommandRunner;
   isExecutable?: (path: string) => Promise<boolean>;
   hasSessionBusSocket?: (path: string) => Promise<boolean>;
@@ -229,6 +240,7 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
   const uid = options.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
   const windows = platform === "win32";
   const path = windows ? win32 : posix;
+  const now = options.now ?? Date.now;
   const run = options.run ?? runCommand;
   const readFile = options.readFile ?? defaultReadFile;
   const hasSessionBusSocket = options.hasSessionBusSocket ?? (async (file: string) => {
@@ -255,34 +267,21 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
    * 无需注入时返回 undefined，保持原有的环境继承行为。
    */
   async function sessionBusChildEnv(): Promise<NodeJS.ProcessEnv | undefined> {
+    if (platform !== "linux") return undefined;
     const address = sessionBusAddress(env, uid);
     if (!address) return undefined;
     const socket = address.slice("unix:path=".length);
     if (!(await hasSessionBusSocket(socket))) return undefined;
     const extra: NodeJS.ProcessEnv = { DBUS_SESSION_BUS_ADDRESS: address };
     if (!env.XDG_RUNTIME_DIR?.trim()) extra.XDG_RUNTIME_DIR = posix.dirname(socket);
-    // env 是覆盖式传参，必须带上完整环境，否则 PATH 丢失会让子进程连自身都解析不到。
-    return { ...process.env, ...extra };
+    // env 是覆盖式传参，必须带上完整环境，同时保留 options.env 注入的覆盖项。
+    return { ...process.env, ...env, ...extra };
   }
 
   return {
     store,
     locator: `${platform}:${home}:gemini:antigravity`,
     async locateBinary() {
-      const expandPath = (raw?: string | null): string | null => {
-        if (!raw) return null;
-        const unquoted = raw.trim().replace(/^"|"$/g, "").trim();
-        if (!unquoted) return null;
-        const expanded = unquoted === "~"
-          ? home
-          : unquoted.startsWith("~/") || (windows && unquoted.startsWith("~\\"))
-            ? path.join(home, unquoted.slice(2))
-            : unquoted;
-        if (!path.isAbsolute(expanded)) return null;
-        const normalized = path.normalize(expanded);
-        return normalized.length > (windows ? 3 : 1) ? normalized.replace(/[/\\]+$/, "") : normalized;
-      };
-
       const expandBinaryCandidates = (target: string): string[] => {
         if (windows) {
           const direct = path.extname(target) !== "" ? [target] : [`${target}.exe`, `${target}.cmd`, target];
@@ -300,7 +299,7 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
 
       // 优先级 1（显式环境变量）
       for (const raw of [env.ANTIGRAVITY_CLI_PATH, env.AGY_PATH]) {
-        const target = expandPath(raw);
+        const target = expandPath(raw, home, path);
         if (target) {
           const found = await testTarget(target);
           if (found) return found;
@@ -309,12 +308,12 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
 
       // 优先级 2（Paseo 宿主配置，可选）
       try {
-        const paseoHome = expandPath(env.PASEO_HOME) ?? path.join(home, ".paseo");
+        const paseoHome = expandPath(env.PASEO_HOME, home, path) ?? path.join(home, ".paseo");
         const configPath = path.join(paseoHome, "config.json");
         const config = JSON.parse(await readFile(configPath, "utf8"));
         const command = config?.agents?.providers?.antigravity?.command?.[0];
         if (typeof command === "string") {
-          const target = expandPath(command);
+          const target = expandPath(command, home, path);
           if (target) {
             const found = await testTarget(target);
             if (found) return found;
@@ -328,7 +327,7 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
       const searchPath = env.PATH ?? env.Path ?? "";
       const pathDirs = searchPath
         .split(path.delimiter)
-        .map(expandPath)
+        .map((entry) => expandPath(entry, home, path))
         .filter((d): d is string => d !== null);
 
       const candidateDirs: string[] = windows
@@ -385,16 +384,22 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
       }
     },
     async readCredential(signal) {
+      if (!windows && platform !== "darwin" && platform !== "linux") {
+        throw new ProbeError("Antigravity usage supports Windows, macOS and Linux keyrings only.");
+      }
+
       const readTokenFromFile = async (): Promise<StoredCredential | null> => {
         for (const candidate of candidateTokenPaths(home, env, path)) {
           if (signal.aborted) throw new ProbeError("Antigravity credential lookup timed out.");
+          let raw: string;
           try {
-            const raw = await readFile(candidate, "utf8");
-            if (raw && raw.trim() !== "") {
-              return parseStoredCredential(raw);
-            }
+            raw = await readFile(candidate, "utf8");
           } catch {
             // File not found or unreadable, continue to next candidate
+            continue;
+          }
+          if (raw.trim() !== "") {
+            return parseStoredCredential(raw);
           }
         }
         return null;
@@ -418,7 +423,7 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
             "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w",
           ], signal);
           if (result.exitCode === 44) result = { stdout: "", exitCode: 0 }; // errSecItemNotFound
-        } else if (platform === "linux") {
+        } else {
           // Requires libsecret's secret-tool and an unlocked Secret Service session.
           // 宿主进程没有会话总线时（systemd 服务、容器）先补上推导出的标准地址。
           result = await run(
@@ -434,8 +439,27 @@ export function createNodeProbe(options: ProbeOptions = {}): AntigravityProbe {
         keyringError = err;
       }
 
+      let keyringCredential: StoredCredential | null = null;
       if (result && result.exitCode === 0 && result.stdout.trim() !== "") {
-        return parseStoredCredential(result.stdout.trim());
+        keyringCredential = parseStoredCredential(result.stdout.trim());
+        if (keyringCredential.expiresAtMs === null || keyringCredential.expiresAtMs > now()) {
+          return keyringCredential;
+        }
+      }
+
+      if (keyringCredential) {
+        try {
+          const fileCredential = await readTokenFromFile();
+          if (
+            fileCredential?.accessToken
+            && (fileCredential.expiresAtMs === null || fileCredential.expiresAtMs > keyringCredential.expiresAtMs!)
+          ) {
+            return fileCredential;
+          }
+        } catch (err) {
+          if (signal.aborted && err instanceof ProbeError) throw err;
+        }
+        return keyringCredential;
       }
 
       // 降级回退：读取 CLI 落盘的文件型凭据（用于无 D-Bus 会话、容器、后台守护进程或 Keyring 超时降级场景）

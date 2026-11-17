@@ -5,7 +5,6 @@ export const credentialStoreSchema = z.enum([
   "windows-credential-manager",
   "macos-keychain",
   "secret-service",
-  "file",
 ]);
 
 export const inputSchema = z.object({ store: credentialStoreSchema }).strict();
