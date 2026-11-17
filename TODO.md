@@ -1,5 +1,5 @@
 # TODO
 
-- [ ] macOS / Linux 真实凭据联调
-- [ ] Session 级凭据归属与 Composer Pill
-- [ ] 本地 conversations 消耗统计
+- [ ] 在 macOS 真机上验证 Keychain 凭据读取与登录续期
+- [ ] 关联单个会话的登录账号并在输入框展示额度胶囊
+- [ ] 统计本地对话记录的额度消耗

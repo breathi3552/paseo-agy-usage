@@ -1,36 +1,33 @@
 # Changelog
 
-## Unreleased
+## 0.1.3, 2026-11-17
 
 ### Fixed
 
-- Read the Linux keyring from headless hosts: when the Paseo daemon runs as a system service, container, or any process without `DBUS_SESSION_BUS_ADDRESS`, `secret-tool` used to fail with “Cannot autolaunch D-Bus without X11 $DISPLAY”, so the usage account silently disappeared from the native Usage settings. Both the credential reader and the `agy models` renewal now derive the session bus from `XDG_RUNTIME_DIR`, falling back to `/run/user/<uid>`, and only when that socket exists.
-- Fall back to CLI-written token files when the OS keyring is unavailable, and read the account email from `id_token_email`.
+- Connect to the Linux keyring on headless hosts. When Paseo runs without `DBUS_SESSION_BUS_ADDRESS`, `secret-tool` and `agy models` now read the session bus socket from `XDG_RUNTIME_DIR` or `/run/user/<uid>` (thanks @magicbear, #4).
+- Read CLI token files such as `~/.gemini/antigravity-cli/antigravity-oauth-token` when the OS keyring is unavailable or holds an expired token, and extract the account email from `id_token_email` (thanks @magicbear, #4).
 
-## 0.1.2 — 2026-11-10
+## 0.1.2, 2026-11-10
 
 ### Added
 
-- Gemini 4 Argon weekly window for logins whose quota summary reports the separate Argon pool (thanks @gtoxlili, #3).
-- Robust multi-platform Antigravity CLI binary resolution across Windows, macOS, and Linux, supporting custom environment variables, Paseo host configuration, and standard installation paths (inspired by @LunabellaBetter, #1).
+- Add the Gemini 4 Argon weekly window when the quota summary reports the `gemini-argon-wtu-weekly` bucket (thanks @gtoxlili, #3).
+- Locate the `agy` binary across Windows, macOS, and Linux from `ANTIGRAVITY_CLI_PATH`, `AGY_PATH`, `~/.paseo/config.json`, and standard install directories (inspired by @LunabellaBetter, #1).
 
-## 0.1.1 — 2026-10-18
+## 0.1.1, 2026-10-18
 
 ### Fixed
 
-- Match Gemini quotas and reset times to `agy /usage` using the CLI service endpoint and installed CLI version.
-- Attempt login renewal once via `agy models` for expired credentials, missing access tokens, or HTTP 401/403, then reload credentials and quotas. Requests have an 18-second deadline and sanitized errors; opening the popover remains subject to host caching.
-- Use built-in Windows PowerShell 5.1 instead of requiring PowerShell 7, and reuse the public Paseo SDK's `execCommand()`. macOS/Linux readers are unchanged; no new runtime dependencies.
+- Match Gemini quotas and reset times to `agy /usage` by sending the installed CLI version in the `User-Agent` header to `daily-cloudcode-pa.googleapis.com`.
+- Renew logins once with `agy models` when a token expires, is missing, or returns HTTP 401 or 403. Bound each refresh to 18 seconds and strip command output from errors.
+- Read Windows credentials with `powershell.exe` instead of `pwsh`, and run child processes with `execCommand()` from `@getpaseo/plugin/server`.
 
 ## 0.1.0
 
 ### Added
 
-- Native Antigravity usage source for Paseo 0.11+.
-- Gemini and Claude & GPT quotas with 5-hour and weekly windows, reset times, and subscription labels.
-- Automatic CLI and OS-login discovery with an account-email footer.
-- Read-only credential access, CLI-managed login renewal, and sanitized error diagnostics.
-- Windows Credential Manager, macOS Keychain, and Linux Secret Service adapters. Windows has live-host verification.
-- Behavior-focused tests, CI, and a GitHub-only release workflow.
-- An Antigravity mark above an outlined progress bar, with monochrome and flat terracotta listing icons.
-- A redacted screenshot of the native Usage card, included in the README and plugin listing media.
+- Register the `antigravity` usage source for Paseo 0.11.0 and later.
+- Report Gemini and Claude & GPT quotas for the 5-hour and weekly windows, with reset times and plan labels.
+- Discover local `agy` logins and display the account email in the card footer.
+- Read credentials from Windows Credential Manager, macOS Keychain, and Linux Secret Service without redeeming refresh tokens directly.
+- Add unit tests, GitHub Actions CI, and the release workflow.
